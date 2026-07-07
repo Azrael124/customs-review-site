@@ -496,8 +496,13 @@ with col_std1:
         "上传标准清关文件（PDF格式）",
         type=["pdf"],
         key="standard",
-        help="此文件作为比对基准，所有待复核文件将与此文件进行比对。",
+        help="此文件作为比对基准，所有待复核文件将与此文件进行比对。限制 20MB。",
     )
+
+    # 标准文件大小校验（20MB）
+    if standard_file and standard_file.size > 20 * 1024 * 1024:
+        st.error(f"❌ 标准文件 {standard_file.name} 大小 {standard_file.size / 1024 / 1024:.1f}MB，超过 20MB 限制。请压缩后重新上传。")
+        standard_file = None
 
 with col_std2:
     st.markdown("<br>", unsafe_allow_html=True)
