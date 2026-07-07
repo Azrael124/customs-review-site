@@ -103,59 +103,81 @@ def extract_text_from_pdf(file_bytes: bytes, filename: str) -> str:
     return result
 
 
-def extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
-    """用 PaddleOCR 提取图片或扫描 PDF 中的文字。"""
-    try:
-        from paddleocr import PaddleOCR
-        import fitz  # pymupdf
+# PaddleOCR 可用性检测
+try:
+    from paddleocr import PaddleOCR
 
-        ocr = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+    HAS_PADDLEOCR = True
+except ImportError:
+    HAS_PADDLEOCR = False
+
+
+def extract_text_with_pymupdf(file_bytes: bytes, filename: str) -> str:
+    """用 PyMuPDF 提取扫描 PDF 的嵌入文本（轻量级后备方案）。"""
+    try:
+        import fitz
 
         full_text = []
-        ext = Path(filename).suffix.lower()
+        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for i, page in enumerate(pdf_doc, 1):
+            text = page.get_text()
+            if text.strip():
+                full_text.append(f"--- 第 {i} 页 ---\n{text}")
+        pdf_doc.close()
+        return "\n".join(full_text) if full_text else ""
+    except Exception:
+        return ""
 
-        if ext == ".pdf":
-            # PDF: 逐页渲染为图片再 OCR
-            pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
-            for i, page in enumerate(pdf_doc, 1):
-                pix = page.get_pixmap(dpi=200)
-                img_bytes = pix.tobytes("png")
-                # 保存临时文件
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    tmp.write(img_bytes)
+
+def extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
+    """用 PaddleOCR 提取图片或扫描 PDF 中的文字。未安装时回退到 PyMuPDF。"""
+    # PaddleOCR 可用时使用它
+    if HAS_PADDLEOCR:
+        try:
+            import fitz
+
+            ocr = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+
+            full_text = []
+            ext = Path(filename).suffix.lower()
+
+            if ext == ".pdf":
+                pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                for i, page in enumerate(pdf_doc, 1):
+                    pix = page.get_pixmap(dpi=200)
+                    img_bytes = pix.tobytes("png")
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp.write(img_bytes)
+                        tmp_path = tmp.name
+                    try:
+                        result = ocr.ocr(tmp_path)
+                        if result and result[0]:
+                            page_text = "\n".join(
+                                line[1][0] for line in result[0]
+                            )
+                            full_text.append(f"--- 第 {i} 页 ---\n{page_text}")
+                    finally:
+                        os.unlink(tmp_path)
+                pdf_doc.close()
+            else:
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(file_bytes)
                     tmp_path = tmp.name
                 try:
                     result = ocr.ocr(tmp_path)
                     if result and result[0]:
-                        page_text = "\n".join(
-                            line[1][0] for line in result[0]
+                        full_text.append(
+                            "\n".join(line[1][0] for line in result[0])
                         )
-                        full_text.append(f"--- 第 {i} 页 ---\n{page_text}")
                 finally:
                     os.unlink(tmp_path)
-            pdf_doc.close()
-        else:
-            # 图片：直接 OCR
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                tmp.write(file_bytes)
-                tmp_path = tmp.name
-            try:
-                result = ocr.ocr(tmp_path)
-                if result and result[0]:
-                    full_text.append(
-                        "\n".join(line[1][0] for line in result[0])
-                    )
-            finally:
-                os.unlink(tmp_path)
 
-        return "\n".join(full_text)
+            return "\n".join(full_text)
+        except Exception as e:
+            st.warning(f"PaddleOCR 提取异常: {e}，尝试回退方案...")
 
-    except ImportError:
-        st.warning("PaddleOCR 未安装，无法处理扫描件和图片文件。")
-        return ""
-    except Exception as e:
-        st.error(f"OCR 提取失败: {e}")
-        return ""
+    # 回退：PyMuPDF 提取（适用于部分扫描件内嵌的文本层）
+    return extract_text_with_pymupdf(file_bytes, filename)
 
 
 def smart_extract(file_bytes: bytes, filename: str) -> tuple:
@@ -165,10 +187,13 @@ def smart_extract(file_bytes: bytes, filename: str) -> tuple:
     """
     ext = Path(filename).suffix.lower()
 
-    # 图片文件直接用 OCR
+    # 图片文件：尝试 OCR
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"):
         text = extract_text_with_ocr(file_bytes, filename)
-        return text, "PaddleOCR (图片)"
+        method = "PaddleOCR (图片)" if (HAS_PADDLEOCR and text) else "PyMuPDF (图片回退)"
+        if not text.strip():
+            st.warning("⚠️ 图片文件需 PaddleOCR 才能提取文字。Streamlit Cloud 免费版暂不支持 PaddleOCR，请使用文本型 PDF 或将图片转为 PDF 上传。")
+        return text, method
 
     # PDF: 先试 pdfplumber
     if ext == ".pdf":
