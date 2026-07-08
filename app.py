@@ -616,7 +616,7 @@ def fuzzy_match(text: str, target: str) -> tuple:
     import unicodedata
 
     def normalize(s):
-        s = unicodedata.nfkc(s).casefold()
+        s = unicodedata.normalize("NFKC", s).casefold()
         s = re.sub(r"\s+", "", s)
         s = s.replace("（", "(").replace("）", ")").replace("，", ",").replace("。", ".")
         return s
