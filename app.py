@@ -426,7 +426,7 @@ def check_internal_consistency(text: str, api_key: str, model: str) -> dict:
 
 # ── Excel 导出 ───────────────────────────────────────────
 
-def export_to_excel(result: dict, standard_name: str, review_name: str) -> bytes:
+def export_to_excel(result: dict, shipper_label: str, review_name: str) -> bytes:
     """将比对结果导出为 Excel 文件。"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -452,8 +452,8 @@ def export_to_excel(result: dict, standard_name: str, review_name: str) -> bytes
     ws_overview["A1"].font = title_font
     ws_overview.merge_cells("A1:D1")
 
-    ws_overview["A3"] = "标准文件:"
-    ws_overview["B3"] = standard_name
+    ws_overview["A3"] = "核对发货人:"
+    ws_overview["B3"] = shipper_label
     ws_overview["A4"] = "待复核文件:"
     ws_overview["B4"] = review_name
     ws_overview["A5"] = "复核时间:"
@@ -833,7 +833,7 @@ if "results_cache" in st.session_state:
                 f"识别字段数：{result.get('detected_fields', 0)}"
             )
 
-            excel_data = export_to_excel(result, standard_name, file_name)
+            excel_data = export_to_excel(result, correct_shipper, file_name)
             st.download_button(
                 label=f"📥 导出 {file_name} 比对报告 (Excel)",
                 data=excel_data,
