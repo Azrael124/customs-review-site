@@ -109,50 +109,34 @@ def extract_text_from_pdf(file_bytes: bytes, filename: str) -> str:
     return result
 
 
-# ── DeepSeek Vision OCR ──────────────────────────────────
+# ── Tesseract OCR ────────────────────────────────────────
 
-def deepseek_vision_ocr(file_bytes: bytes, filename: str, api_key: str) -> str:
-    """用 DeepSeek Vision API 对扫描件/图片进行 OCR 识别。"""
-    import base64, fitz
-    from openai import OpenAI
+def tesseract_ocr(file_bytes: bytes, filename: str) -> str:
+    """用 Tesseract OCR 提取扫描件/图片中的文字。"""
+    import pytesseract, fitz
+    from PIL import Image
 
-    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    full_text = []
     ext = Path(filename).suffix.lower()
 
-    # 渲染页面为图片
-    images_b64 = []
-    if ext == ".pdf":
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        for page in doc:
-            pix = page.get_pixmap(dpi=150)
-            images_b64.append(base64.b64encode(pix.tobytes("png")).decode())
-        doc.close()
-    else:
-        images_b64.append(base64.b64encode(file_bytes).decode())
-
-    if not images_b64:
-        return ""
-
-    # 单页直接用 vision，多页取首页做 OCR（控制成本）
-    image_content = [
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images_b64[0]}"}}
-    ]
-
     try:
-        resp = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请提取这张清关文件图片中的所有文字内容。保留原始格式和表格结构，逐行输出。只输出文字，不要加任何解释。"},
-                    *image_content,
-                ],
-            }],
-            max_tokens=4096,
-        )
-        return resp.choices[0].message.content.strip()
+        if ext == ".pdf":
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for i, page in enumerate(doc, 1):
+                pix = page.get_pixmap(dpi=200)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+                if text.strip():
+                    full_text.append(f"--- 第 {i} 页 ---\n{text}")
+            doc.close()
+        else:
+            img = Image.open(BytesIO(file_bytes))
+            text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+            if text.strip():
+                full_text.append(text)
+        return "\n".join(full_text)
     except Exception as e:
-        st.warning(f"DeepSeek Vision OCR 失败: {e}")
+        st.warning(f"Tesseract OCR 失败: {e}")
         return ""
 
 
@@ -182,14 +166,14 @@ def extract_text_with_pymupdf(file_bytes: bytes, filename: str) -> str:
         return ""
 
 
-def extract_text_with_image_ocr(file_bytes: bytes, filename: str, api_key: str = "") -> str:
-    """OCR 后备链：PaddleOCR → DeepSeek Vision → PyMuPDF。"""
+def extract_text_with_image_ocr(file_bytes: bytes, filename: str) -> str:
+    """OCR 后备链：PaddleOCR → Tesseract → PyMuPDF。"""
     # PaddleOCR（本地可用时）
     if HAS_PADDLEOCR:
         try:
             import fitz
             ocr = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
-            full_text, imgs = [], []
+            full_text = []
 
             if Path(filename).suffix.lower() == ".pdf":
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -218,11 +202,10 @@ def extract_text_with_image_ocr(file_bytes: bytes, filename: str, api_key: str =
         except Exception:
             pass
 
-    # DeepSeek Vision（Streamlit Cloud 后备）
-    if api_key:
-        text = deepseek_vision_ocr(file_bytes, filename, api_key)
-        if text.strip():
-            return text
+    # Tesseract（Streamlit Cloud 后备）
+    text = tesseract_ocr(file_bytes, filename)
+    if text.strip():
+        return text
 
     # PyMuPDF（最后尝试）
     return extract_text_with_pymupdf(file_bytes, filename)
@@ -230,34 +213,33 @@ def extract_text_with_image_ocr(file_bytes: bytes, filename: str, api_key: str =
 
 def smart_extract(file_bytes: bytes, filename: str, api_key: str = "") -> tuple:
     """
-    智能提取：pdfplumber → DeepSeek Vision OCR → 直接报错。
+    智能提取：pdfplumber → Tesseract OCR → 报错提示。
     返回 (extracted_text, method_used)
+    api_key 参数保留用于 DeepSeek 比对环节，OCR 不需要。
     """
     ext = Path(filename).suffix.lower()
 
-    # 图片文件：DeepSeek Vision OCR
+    # 图片文件：Tesseract OCR
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"):
-        if api_key:
-            st.info("正在用 DeepSeek Vision 识别图片文字...")
-            text = extract_text_with_image_ocr(file_bytes, filename, api_key)
-            if text.strip():
-                return text, "DeepSeek Vision (图片 OCR)"
-        return "", "OCR 不可用（需 API Key）"
+        st.info("正在用 Tesseract OCR 识别图片文字...")
+        text = extract_text_with_image_ocr(file_bytes, filename)
+        if text.strip():
+            return text, "Tesseract OCR (图片)"
+        return "", "OCR 失败"
 
     # PDF: 先试 pdfplumber
     if ext == ".pdf":
         text = extract_text_from_pdf(file_bytes, filename)
 
         if len(text.strip()) < 50:
-            if api_key:
-                st.info("检测到扫描件 PDF，正在用 DeepSeek Vision 识别...")
-                ocr_text = extract_text_with_image_ocr(file_bytes, filename, api_key)
-                if ocr_text and len(ocr_text.strip()) > 0:
-                    return ocr_text, "DeepSeek Vision (扫描 PDF OCR)"
+            st.info("检测到扫描件 PDF，正在用 Tesseract OCR 识别...")
+            ocr_text = extract_text_with_image_ocr(file_bytes, filename)
+            if ocr_text and len(ocr_text.strip()) > 0:
+                return ocr_text, "Tesseract OCR (扫描 PDF)"
             elif text.strip():
                 return text, "pdfplumber (文本 PDF — 内容较少)"
-            st.warning("⚠️ 扫描件 PDF 无法提取文字。请在侧边栏填写 DeepSeek API Key 以启用 Vision OCR。")
-            return "", "提取失败（扫描件，无 API Key）"
+            st.warning("⚠️ 扫描件 PDF OCR 失败。请确认文件清晰度。")
+            return "", "提取失败（OCR 无结果）"
         return text, "pdfplumber (文本 PDF)"
 
     return "", "不支持的文件格式"
