@@ -809,9 +809,11 @@ if "results_cache" in st.session_state:
             # ── 内部一致性检查 ──
             internal = result.get("internal_consistency", {})
             if internal:
-                issues = internal.get("issues", [])
                 st.markdown(f"#### 🔍 文件内部一致性")
-                if issues:
+                consistent = internal.get("consistent", True)
+                issues = internal.get("issues", [])
+
+                if not consistent:
                     st.markdown(f'<div class="info-item">⚠️ 发现 {len(issues)} 处数据矛盾</div>', unsafe_allow_html=True)
                     for iss in issues:
                         sev = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(iss.get("severity", ""), "⚪")
@@ -822,8 +824,13 @@ if "results_cache" in st.session_state:
                             f'<small>位置：{iss.get("location", "")}</small></div>',
                             unsafe_allow_html=True,
                         )
+                elif issues:
+                    st.info(f"ℹ️ 数据基本一致，{len(issues)} 处轻微提醒")
+                    for iss in issues:
+                        st.caption(f"· {iss.get('field', '')}: {iss.get('detail', '')}")
                 else:
                     st.success(f"✅ {internal.get('summary', '文件内部数据自洽，未发现矛盾。')}")
+
                 if internal.get("_error"):
                     st.caption(f"⚠️ {internal['_error']}")
 
