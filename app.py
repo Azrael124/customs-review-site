@@ -109,6 +109,53 @@ def extract_text_from_pdf(file_bytes: bytes, filename: str) -> str:
     return result
 
 
+# ── DeepSeek Vision OCR ──────────────────────────────────
+
+def deepseek_vision_ocr(file_bytes: bytes, filename: str, api_key: str) -> str:
+    """用 DeepSeek Vision API 对扫描件/图片进行 OCR 识别。"""
+    import base64, fitz
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    ext = Path(filename).suffix.lower()
+
+    # 渲染页面为图片
+    images_b64 = []
+    if ext == ".pdf":
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page in doc:
+            pix = page.get_pixmap(dpi=150)
+            images_b64.append(base64.b64encode(pix.tobytes("png")).decode())
+        doc.close()
+    else:
+        images_b64.append(base64.b64encode(file_bytes).decode())
+
+    if not images_b64:
+        return ""
+
+    # 单页直接用 vision，多页取首页做 OCR（控制成本）
+    image_content = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images_b64[0]}"}}
+    ]
+
+    try:
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请提取这张清关文件图片中的所有文字内容。保留原始格式和表格结构，逐行输出。只输出文字，不要加任何解释。"},
+                    *image_content,
+                ],
+            }],
+            max_tokens=4096,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        st.warning(f"DeepSeek Vision OCR 失败: {e}")
+        return ""
+
+
 # PaddleOCR 可用性检测
 try:
     from paddleocr import PaddleOCR
@@ -135,86 +182,82 @@ def extract_text_with_pymupdf(file_bytes: bytes, filename: str) -> str:
         return ""
 
 
-def extract_text_with_ocr(file_bytes: bytes, filename: str) -> str:
-    """用 PaddleOCR 提取图片或扫描 PDF 中的文字。未安装时回退到 PyMuPDF。"""
-    # PaddleOCR 可用时使用它
+def extract_text_with_image_ocr(file_bytes: bytes, filename: str, api_key: str = "") -> str:
+    """OCR 后备链：PaddleOCR → DeepSeek Vision → PyMuPDF。"""
+    # PaddleOCR（本地可用时）
     if HAS_PADDLEOCR:
         try:
             import fitz
-
             ocr = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+            full_text, imgs = [], []
 
-            full_text = []
-            ext = Path(filename).suffix.lower()
-
-            if ext == ".pdf":
-                pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
-                for i, page in enumerate(pdf_doc, 1):
+            if Path(filename).suffix.lower() == ".pdf":
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                for page in doc:
                     pix = page.get_pixmap(dpi=200)
                     img_bytes = pix.tobytes("png")
                     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        tmp.write(img_bytes)
-                        tmp_path = tmp.name
+                        tmp.write(img_bytes); tmp_path = tmp.name
                     try:
-                        result = ocr.ocr(tmp_path)
-                        if result and result[0]:
-                            page_text = "\n".join(
-                                line[1][0] for line in result[0]
-                            )
-                            full_text.append(f"--- 第 {i} 页 ---\n{page_text}")
+                        r = ocr.ocr(tmp_path)
+                        if r and r[0]:
+                            full_text.append("\n".join(l[1][0] for l in r[0]))
                     finally:
                         os.unlink(tmp_path)
-                pdf_doc.close()
+                doc.close()
             else:
-                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                    tmp.write(file_bytes)
-                    tmp_path = tmp.name
+                with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix, delete=False) as tmp:
+                    tmp.write(file_bytes); tmp_path = tmp.name
                 try:
-                    result = ocr.ocr(tmp_path)
-                    if result and result[0]:
-                        full_text.append(
-                            "\n".join(line[1][0] for line in result[0])
-                        )
+                    r = ocr.ocr(tmp_path)
+                    if r and r[0]:
+                        full_text.append("\n".join(l[1][0] for l in r[0]))
                 finally:
                     os.unlink(tmp_path)
-
             return "\n".join(full_text)
-        except Exception as e:
-            st.warning(f"PaddleOCR 提取异常: {e}，尝试回退方案...")
+        except Exception:
+            pass
 
-    # 回退：PyMuPDF 提取（适用于部分扫描件内嵌的文本层）
+    # DeepSeek Vision（Streamlit Cloud 后备）
+    if api_key:
+        text = deepseek_vision_ocr(file_bytes, filename, api_key)
+        if text.strip():
+            return text
+
+    # PyMuPDF（最后尝试）
     return extract_text_with_pymupdf(file_bytes, filename)
 
 
-def smart_extract(file_bytes: bytes, filename: str) -> tuple:
+def smart_extract(file_bytes: bytes, filename: str, api_key: str = "") -> tuple:
     """
-    智能提取：先尝试 pdfplumber，如果结果太少则自动切换 OCR。
+    智能提取：pdfplumber → DeepSeek Vision OCR → 直接报错。
     返回 (extracted_text, method_used)
     """
     ext = Path(filename).suffix.lower()
 
-    # 图片文件：尝试 OCR
+    # 图片文件：DeepSeek Vision OCR
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"):
-        text = extract_text_with_ocr(file_bytes, filename)
-        method = "PaddleOCR (图片)" if (HAS_PADDLEOCR and text) else "PyMuPDF (图片回退)"
-        if not text.strip():
-            st.warning("⚠️ 图片文件需 PaddleOCR 才能提取文字。Streamlit Cloud 免费版暂不支持 PaddleOCR，请使用文本型 PDF 或将图片转为 PDF 上传。")
-        return text, method
+        if api_key:
+            st.info("正在用 DeepSeek Vision 识别图片文字...")
+            text = extract_text_with_image_ocr(file_bytes, filename, api_key)
+            if text.strip():
+                return text, "DeepSeek Vision (图片 OCR)"
+        return "", "OCR 不可用（需 API Key）"
 
     # PDF: 先试 pdfplumber
     if ext == ".pdf":
         text = extract_text_from_pdf(file_bytes, filename)
 
-        # 如果文本太少（可能扫描件），尝试 OCR
         if len(text.strip()) < 50:
-            st.info("检测到 PDF 文本内容较少，可能为扫描件，正在尝试 OCR...")
-            ocr_text = extract_text_with_ocr(file_bytes, filename)
-            if ocr_text and len(ocr_text) > len(text):
-                return ocr_text, "PaddleOCR (扫描 PDF)"
+            if api_key:
+                st.info("检测到扫描件 PDF，正在用 DeepSeek Vision 识别...")
+                ocr_text = extract_text_with_image_ocr(file_bytes, filename, api_key)
+                if ocr_text and len(ocr_text.strip()) > 0:
+                    return ocr_text, "DeepSeek Vision (扫描 PDF OCR)"
             elif text.strip():
-                return text, "pdfplumber (文本 PDF)"
-            else:
-                return ocr_text or "", "PaddleOCR (扫描 PDF)"
+                return text, "pdfplumber (文本 PDF — 内容较少)"
+            st.warning("⚠️ 扫描件 PDF 无法提取文字。请在侧边栏填写 DeepSeek API Key 以启用 Vision OCR。")
+            return "", "提取失败（扫描件，无 API Key）"
         return text, "pdfplumber (文本 PDF)"
 
     return "", "不支持的文件格式"
@@ -571,7 +614,7 @@ if start_btn:
         # Step 1: 提取标准文件
         st.write("📖 **Step 1**: 提取标准文件内容...")
         std_bytes = standard_file.read()
-        std_text, std_method = smart_extract(std_bytes, standard_file.name)
+        std_text, std_method = smart_extract(std_bytes, standard_file.name, api_key)
         std_fields = detect_data_fields(std_text)
 
         col1, col2, col3 = st.columns(3)
@@ -596,7 +639,7 @@ if start_btn:
         for idx, review_file in enumerate(review_files):
             st.write(f"  [{idx+1}/{len(review_files)}] 正在处理: **{review_file.name}**...")
             rev_bytes = review_file.read()
-            rev_text, rev_method = smart_extract(rev_bytes, review_file.name)
+            rev_text, rev_method = smart_extract(rev_bytes, review_file.name, api_key)
             rev_fields = detect_data_fields(rev_text)
 
             # Step 3: 文本有效性检查
