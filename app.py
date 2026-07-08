@@ -374,32 +374,36 @@ def compare_with_deepseek(
 
 def check_internal_consistency(text: str, api_key: str, model: str) -> dict:
     """
-    检查单文件内部数据一致性（所有字段，不受基准比对范围限制）。
+    检查单文件内部数据一致性（单价/金额/重量/托盘/港口）。
     """
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-    prompt = f"""你是清关文件审核员。请检查以下文件**内部数据是否自洽**。
+    prompt = f"""你是清关文件审核员。请检查以下文件**内部关键数据是否自洽**。
 
-检查要点：
-1. 同一信息在多处出现时是否一致（如金额大写和小写、同一公司名称前后写法）
-2. 数量×单价是否约等于总价（如有）
-3. 毛重应 ≥ 净重（如有）
-4. 日期逻辑是否合理（发票日期 ≤ 装箱日期 ≤ 提单日期）
-5. 收发货人、合同号、发票号、提单号在文件各处是否统一
-6. 其他任何明显的数据矛盾
+【仅检查以下字段】
+- 单品单价 / Unit Price
+- 单品小计金额 / Amount（数量×单价是否≈小计金额）
+- 单品毛重 / Gross Weight
+- 单品净重 / Net Weight（毛重应 ≥ 净重）
+- 总金额 / Total Amount（单品金额累加是否≈总金额）
+- 总重量 / Total Weight（单品重量累加是否≈总重量）
+- 总托盘数量 / Total Pallets
+- 发货港 / Port of Loading
+- 目的地港 / Port of Discharge
 
 【文件文本（前6000字符）】
 {text[:6000]}
 
 只输出 JSON：
-
 {{
   "consistent": true,
   "issues": [{{"field": "字段", "location": "位置描述", "detail": "不一致说明", "severity": "high|medium|low"}}],
   "summary": "内部一致性结论（30字内）"
-}}"""
+}}
+
+注意：OCR 可能有错行，数值接近（差异<5%）可视为一致，明显不合逻辑才报告。港口名称允许中英文差异。"""
 
     try:
         response = client.chat.completions.create(
@@ -545,28 +549,23 @@ def export_to_excel(result: dict, standard_name: str, review_name: str) -> bytes
 # ── 主界面 ───────────────────────────────────────────────
 
 st.title("🛃 清关文件复核系统")
-st.markdown("上传标准清关文件和待复核文件，AI 自动提取数据并进行语义级比对。")
+st.markdown("填写正确收发货人，上传待复核文件，AI 自动提取并校验。")
 
-# ── 标准文件区域 ──
-st.subheader("📄 标准文件（比对基准）")
-col_std1, col_std2 = st.columns([3, 1])
-
-with col_std1:
-    standard_file = st.file_uploader(
-        "上传标准清关文件（PDF格式）",
-        type=["pdf"],
-        key="standard",
-        help="此文件作为比对基准，所有待复核文件将与此文件进行比对。限制 20MB。",
+# ── 收发货人输入 ──
+st.subheader("📋 正确收发货人")
+col_shipper, col_consignee = st.columns(2)
+with col_shipper:
+    correct_shipper = st.text_input(
+        "正确发货人 (Shipper)",
+        placeholder="例如：DAIT INTERNATIONAL LTD",
+        help="填入正确的发货人全称，比对时不区分大小写。",
     )
-
-    # 标准文件大小校验（20MB）
-    if standard_file and standard_file.size > 20 * 1024 * 1024:
-        st.error(f"❌ 标准文件 {standard_file.name} 大小 {standard_file.size / 1024 / 1024:.1f}MB，超过 20MB 限制。请压缩后重新上传。")
-        standard_file = None
-
-with col_std2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.caption("💡 标准文件可随时更换，新上传的文件会替代旧基准。")
+with col_consignee:
+    correct_consignee = st.text_input(
+        "正确收货人 (Consignee)",
+        placeholder="例如：ABC TRADING CO., LTD",
+        help="填入正确的收货人全称，比对时不区分大小写。",
+    )
 
 # ── 待复核文件区域 ──
 st.subheader("📑 待复核文件")
@@ -587,57 +586,57 @@ with btn_col1:
         "🔍 开始复核",
         type="primary",
         use_container_width=True,
-        disabled=not (standard_file and review_files and api_key),
+        disabled=not (correct_shipper and correct_consignee and review_files and api_key),
     )
 
 with btn_col2:
     clear_btn = st.button("🗑️ 清除结果", use_container_width=True)
 
 with btn_col3:
-    # 缺失提示
     missing = []
     if not api_key:
         missing.append("⚙️ 请在左侧侧边栏填写 DeepSeek API Key")
-    if not standard_file:
-        missing.append("📄 请上传标准文件（PDF）")
+    if not correct_shipper:
+        missing.append("📋 请填写正确发货人")
+    if not correct_consignee:
+        missing.append("📋 请填写正确收货人")
     if not review_files:
         missing.append("📑 请上传待复核文件")
     if missing:
         st.warning(" · ".join(missing))
 
 if clear_btn:
-    for key in ["results_cache", "last_standard_name", "last_standard_hash"]:
-        if key in st.session_state:
-            del st.session_state[key]
+    if "results_cache" in st.session_state:
+        del st.session_state["results_cache"]
     st.rerun()
+
+
+def fuzzy_match(text: str, target: str) -> tuple:
+    """不区分大小写、忽略空格的中英文模糊匹配。"""
+    import unicodedata
+
+    def normalize(s):
+        s = unicodedata.nfkc(s).casefold()
+        s = re.sub(r"\s+", "", s)
+        s = s.replace("（", "(").replace("）", ")").replace("，", ",").replace("。", ".")
+        return s
+
+    t_norm = normalize(target)
+    txt_norm = normalize(text)
+    if t_norm in txt_norm:
+        return True, "精确匹配"
+    # 尝试逐词匹配（至少70%的词命中）
+    t_words = set(t_norm.split(",")[0].split())
+    found = sum(1 for w in t_words if w and w in txt_norm)
+    ratio = found / max(len(t_words), 1)
+    if ratio >= 0.7:
+        return True, f"模糊匹配 ({ratio:.0%})"
+    return False, "不匹配"
+
 
 # ── 执行复核 ──
 if start_btn:
     with st.status("正在处理...", expanded=True) as status:
-        # Step 1: 提取标准文件
-        st.write("📖 **Step 1**: 提取标准文件内容...")
-        std_bytes = standard_file.read()
-        std_text, std_method = smart_extract(std_bytes, standard_file.name, api_key)
-        std_fields = detect_data_fields(std_text)
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("提取方式", std_method)
-        col2.metric("提取字符数", f"{len(std_text):,}")
-        col3.metric("识别字段数", len(std_fields))
-
-        with st.expander("查看标准文件文本和字段"):
-            st.code(std_text[:3000] + ("..." if len(std_text) > 3000 else ""), language=None)
-            st.json(std_fields)
-
-        # 标准文件为空 → 整批跳过，不浪费 API
-        if len(std_text.strip()) < 20:
-            status.update(label="❌ 标准文件提取失败", state="error")
-            st.error("标准文件是**扫描件 PDF**（图片型），pdfplumber 无法提取文字。Streamlit Cloud 免费版不支持 PaddleOCR。请用 Adobe Acrobat / WPS 的 OCR 功能将扫描件转为文本型 PDF 后重新上传。")
-            st.stop()
-
-        # Step 2: 逐份处理待复核文件
-        st.write(f"📋 **Step 2**: 处理 {len(review_files)} 份待复核文件...")
-
         all_results = []
         for idx, review_file in enumerate(review_files):
             st.write(f"  [{idx+1}/{len(review_files)}] 正在处理: **{review_file.name}**...")
@@ -645,52 +644,54 @@ if start_btn:
             rev_text, rev_method = smart_extract(rev_bytes, review_file.name, api_key)
             rev_fields = detect_data_fields(rev_text)
 
-            # Step 3: 文本有效性检查
-            min_chars = 20
-            if len(std_text.strip()) < min_chars:
-                all_results.append({
-                    "file_name": review_file.name,
-                    "extract_method": std_method if idx == 0 else "N/A",
-                    "extract_chars": len(std_text),
-                    "detected_fields": len(std_fields),
-                    "matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
-                    "summary": "标准文件提取失败",
-                    "_warning": f"标准文件提取到的文字仅 {len(std_text)} 字符。很可能是**扫描件 PDF**（图片型），pdfplumber 无法提取。Streamlit Cloud 免费版不支持 PaddleOCR。请将扫描件转为文本型 PDF（用 Adobe Acrobat / WPS 的 OCR 功能）后重新上传。",
-                    "_raw_text_sample": std_text[:500],
-                    "_skipped": True,
-                })
-                continue
-            if len(rev_text.strip()) < min_chars:
+            # 文本有效性检查
+            if len(rev_text.strip()) < 20:
                 all_results.append({
                     "file_name": review_file.name,
                     "extract_method": rev_method,
                     "extract_chars": len(rev_text),
                     "detected_fields": len(rev_fields),
-                    "matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
-                    "summary": "待复核文件提取失败",
-                    "_warning": f"待复核文件提取到的文字仅 {len(rev_text)} 字符。很可能是**扫描件/图片型 PDF**，pdfplumber 无法提取。请转为文本型 PDF 后重新上传。",
-                    "_raw_text_sample": rev_text[:500],
+                    "shipper_match": None, "consignee_match": None,
+                    "matches": [], "mismatches": [], "summary": "文件提取失败",
+                    "_warning": f"提取文字仅 {len(rev_text)} 字符，无法复核。",
                     "_skipped": True,
                 })
                 continue
 
-            # Step 4: 基准比对（核心字段）
-            st.write(f"  🤖 基准比对: **{review_file.name}**...")
-            result = compare_with_deepseek(
-                standard_text=std_text,
-                review_text=rev_text,
-                standard_fields=std_fields,
-                review_fields=rev_fields,
-                api_key=api_key,
-                model=model,
-            )
+            # Step 1: 收发货人比对（纯字符串，不调 API）
+            shipper_ok, shipper_detail = fuzzy_match(rev_text, correct_shipper)
+            consignee_ok, consignee_detail = fuzzy_match(rev_text, correct_consignee)
 
-            # Step 5: 单文件内部一致性检查
-            st.write(f"  🔍 内部一致性检查: **{review_file.name}**...")
+            matches, mismatches = [], []
+            if shipper_ok:
+                matches.append({"field": "发货人", "standard_value": correct_shipper,
+                                "review_value": shipper_detail, "remark": ""})
+            else:
+                mismatches.append({"field": "发货人", "standard_value": correct_shipper,
+                                   "review_value": shipper_detail, "severity": "high",
+                                   "detail": f"未在文件中找到 '{correct_shipper}'"})
+            if consignee_ok:
+                matches.append({"field": "收货人", "standard_value": correct_consignee,
+                                "review_value": consignee_detail, "remark": ""})
+            else:
+                mismatches.append({"field": "收货人", "standard_value": correct_consignee,
+                                   "review_value": consignee_detail, "severity": "high",
+                                   "detail": f"未在文件中找到 '{correct_consignee}'"})
+
+            result = {
+                "file_name": review_file.name,
+                "shipper_match": shipper_ok,
+                "consignee_match": consignee_ok,
+                "matches": matches,
+                "mismatches": mismatches,
+                "summary": f"发货人{'✅' if shipper_ok else '❌'} 收货人{'✅' if consignee_ok else '❌'}",
+            }
+
+            # Step 2: 内部一致性（API 调用，仅关键财务/物流字段）
+            st.write(f"  🔍 内部数据校验: **{review_file.name}**...")
             internal = check_internal_consistency(rev_text, api_key, model)
             result["internal_consistency"] = internal
 
-            result["file_name"] = review_file.name
             result["extract_method"] = rev_method
             result["extract_chars"] = len(rev_text)
             result["detected_fields"] = len(rev_fields)
@@ -698,26 +699,23 @@ if start_btn:
 
         status.update(label="✅ 处理完成！", state="complete")
 
-    # 缓存结果
     st.session_state["results_cache"] = {
         "all_results": all_results,
-        "standard_name": standard_file.name,
-        "std_fields": std_fields,
-        "std_method": std_method,
+        "correct_shipper": correct_shipper,
+        "correct_consignee": correct_consignee,
     }
-
     st.rerun()
 
 # ── 结果显示 ──
 if "results_cache" in st.session_state:
     cache = st.session_state["results_cache"]
     all_results = cache["all_results"]
-    standard_name = cache["standard_name"]
+    correct_shipper = cache.get("correct_shipper", "")
+    correct_consignee = cache.get("correct_consignee", "")
 
     st.divider()
     st.subheader("📊 复核结果")
 
-    # 汇总统计
     total_matches = sum(len(r.get("matches", [])) for r in all_results)
     total_mismatches = sum(len(r.get("mismatches", [])) for r in all_results)
     total_items = total_matches + total_mismatches
@@ -725,16 +723,11 @@ if "results_cache" in st.session_state:
     metric_cols = st.columns(5)
     metric_cols[0].metric("复核文件数", len(all_results))
     metric_cols[1].metric("✅ 一致项", total_matches)
-    metric_cols[2].metric(
-        "❌ 不一致项",
-        total_mismatches,
-        delta=f"-{total_mismatches}" if total_mismatches > 0 else None,
-    )
-    metric_cols[3].metric(
-        "一致率",
-        f"{total_matches/total_items*100:.1f}%" if total_items > 0 else "N/A",
-    )
-    metric_cols[4].metric("基准文件", standard_name[:15] + "..." if len(standard_name) > 15 else standard_name)
+    metric_cols[2].metric("❌ 不一致项", total_mismatches,
+                          delta=f"-{total_mismatches}" if total_mismatches > 0 else None)
+    metric_cols[3].metric("一致率",
+                          f"{total_matches/total_items*100:.1f}%" if total_items > 0 else "N/A")
+    metric_cols[4].metric("发货人", correct_shipper[:12] + "…" if len(correct_shipper) > 12 else correct_shipper)
 
     # 空结果诊断
     if total_items == 0:
