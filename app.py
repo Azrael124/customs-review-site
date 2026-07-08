@@ -583,6 +583,12 @@ if start_btn:
             st.code(std_text[:3000] + ("..." if len(std_text) > 3000 else ""), language=None)
             st.json(std_fields)
 
+        # 标准文件为空 → 整批跳过，不浪费 API
+        if len(std_text.strip()) < 20:
+            status.update(label="❌ 标准文件提取失败", state="error")
+            st.error("标准文件是**扫描件 PDF**（图片型），pdfplumber 无法提取文字。Streamlit Cloud 免费版不支持 PaddleOCR。请用 Adobe Acrobat / WPS 的 OCR 功能将扫描件转为文本型 PDF 后重新上传。")
+            st.stop()
+
         # Step 2: 逐份处理待复核文件
         st.write(f"📋 **Step 2**: 处理 {len(review_files)} 份待复核文件...")
 
@@ -593,7 +599,36 @@ if start_btn:
             rev_text, rev_method = smart_extract(rev_bytes, review_file.name)
             rev_fields = detect_data_fields(rev_text)
 
-            # Step 3: DeepSeek 比对
+            # Step 3: 文本有效性检查
+            min_chars = 20
+            if len(std_text.strip()) < min_chars:
+                all_results.append({
+                    "file_name": review_file.name,
+                    "extract_method": std_method if idx == 0 else "N/A",
+                    "extract_chars": len(std_text),
+                    "detected_fields": len(std_fields),
+                    "matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
+                    "summary": "标准文件提取失败",
+                    "_warning": f"标准文件提取到的文字仅 {len(std_text)} 字符。很可能是**扫描件 PDF**（图片型），pdfplumber 无法提取。Streamlit Cloud 免费版不支持 PaddleOCR。请将扫描件转为文本型 PDF（用 Adobe Acrobat / WPS 的 OCR 功能）后重新上传。",
+                    "_raw_text_sample": std_text[:500],
+                    "_skipped": True,
+                })
+                continue
+            if len(rev_text.strip()) < min_chars:
+                all_results.append({
+                    "file_name": review_file.name,
+                    "extract_method": rev_method,
+                    "extract_chars": len(rev_text),
+                    "detected_fields": len(rev_fields),
+                    "matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
+                    "summary": "待复核文件提取失败",
+                    "_warning": f"待复核文件提取到的文字仅 {len(rev_text)} 字符。很可能是**扫描件/图片型 PDF**，pdfplumber 无法提取。请转为文本型 PDF 后重新上传。",
+                    "_raw_text_sample": rev_text[:500],
+                    "_skipped": True,
+                })
+                continue
+
+            # Step 4: DeepSeek 比对
             st.write(f"  🤖 正在 AI 比对: **{review_file.name}**...")
             result = compare_with_deepseek(
                 standard_text=std_text,
