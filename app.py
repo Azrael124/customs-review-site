@@ -296,107 +296,128 @@ def compare_with_deepseek(
     model: str,
 ) -> dict:
     """
-    调用 DeepSeek API 进行语义级比对。
+    调用 DeepSeek API 进行基准比对（仅核心字段：收发货人 + 单号）。
     返回结构化比对结果。
     """
     from openai import OpenAI
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com",
-    )
-
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
     max_chars = 8000
-    std_snippet = standard_text[:max_chars]
-    rev_snippet = review_text[:max_chars]
 
-    prompt = f"""你是一名专业的清关文件审核员。请仔细比对标文件（标准文件）和待复核文件，找出数据差异。
+    prompt = f"""你是清关文件审核员。请比对基准文件和待复核文件的**核心字段**是否一致。
 
-【标准文件 - 关键字段】
+【比对范围 — 仅以下字段】
+- 发货人 / Shipper
+- 收货人 / Consignee
+- 合同号 / Contract No
+- 发票号 / Invoice No
+- 提单号 / B/L No
+
+【基准文件字段】
 {json.dumps(standard_fields, ensure_ascii=False, indent=2)}
 
-【待复核文件 - 关键字段】
+【待复核文件字段】
 {json.dumps(review_fields, ensure_ascii=False, indent=2)}
 
-【标准文件 - 文本摘要】
-{std_snippet[:3000]}
+【基准文件文本（前3000字符）】
+{standard_text[:3000]}
 
-【待复核文件 - 文本摘要】
-{rev_snippet[:3000]}
+【待复核文件文本（前3000字符）】
+{review_text[:3000]}
 
-请按以下 JSON 格式输出比对结果（只输出 JSON，不要其他内容）：
+只输出 JSON：
 
 {{
-  "matches": [
-    {{"field": "字段名", "standard_value": "标准文件中的值", "review_value": "待复核文件中的值", "remark": "备注"}}
-  ],
-  "mismatches": [
-    {{"field": "字段名", "standard_value": "标准文件中的值", "review_value": "待复核文件中的值", "severity": "high|medium|low", "detail": "差异说明"}}
-  ],
-  "only_in_standard": ["仅在标准文件中出现的字段或数据"],
-  "only_in_review": ["仅在待复核文件中出现的字段或数据"],
-  "summary": "整体比对结论（中文，50字以内）"
+  "matches": [{{"field": "字段名", "standard_value": "基准值", "review_value": "复核值", "remark": ""}}],
+  "mismatches": [{{"field": "字段名", "standard_value": "基准值", "review_value": "复核值", "severity": "high|medium|low", "detail": "差异"}}],
+  "only_in_standard": [],
+  "only_in_review": [],
+  "summary": "结论（30字内）"
 }}
 
-比对规则：
-1. 关键字段（报关单号、提单号、合同号、发票号、金额、毛重、净重、HS编码、集装箱号等）必须完全一致
-2. 数值类字段允许微小差异（如四舍五入），但需标注
-3. 名称类字段允许中英文表述差异但核心含义须一致
-4. 不一致项按严重程度分类：high（金额/单号不同）、medium（重量/数量不同）、low（格式/表述不同）
-5. 重点检查数据完整性和一致性"""
+规则：
+1. 名称允许中英/繁简差异但实质须一致
+2. 单号必须逐字符一致
+3. 不一致 severity：单号不同=high，收发货人不同=medium"""
 
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {
-                    "role": "system",
-                    "content": "你是一名严谨的清关文件审核专家，只输出有效的 JSON 格式比对结果。",
-                },
+                {"role": "system", "content": "你是清关审核专家，只输出 JSON。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
-            max_tokens=4096,
+            temperature=0.1, max_tokens=4096,
             response_format={"type": "json_object"} if model == "deepseek-chat" else None,
         )
-
         result_text = response.choices[0].message.content.strip()
-
-        # 提取 JSON
         json_match = re.search(r"\{[\s\S]*\}", result_text)
         if json_match:
             result_text = json_match.group(0)
-
         result = json.loads(result_text)
 
-        # 诊断：如果 matches 和 mismatches 都为空，记录原始响应
         if not result.get("matches") and not result.get("mismatches"):
-            result["_warning"] = "AI 未识别到可比对的数据项。请检查文件是否为文本型 PDF（非扫描件），且内容包含清关字段。"
+            result["_warning"] = "AI 未识别到可比对的核心字段。请检查文件内容。"
             result["_raw_text_sample"] = standard_text[:500] + "\n...\n" + review_text[:500]
-
         return result
 
     except json.JSONDecodeError:
         err_text = result_text[:800] if "result_text" in dir() else "无返回内容"
-        st.error(f"❌ DeepSeek 返回了非 JSON 内容，无法解析。\n\n原始响应（前800字符）：\n```\n{err_text}\n```")
-        return {
-            "matches": [],
-            "mismatches": [],
-            "only_in_standard": [],
-            "only_in_review": [],
-            "summary": "比对失败：API 返回格式异常",
-            "_error": f"JSON parse error. Raw: {err_text[:200]}",
-        }
+        st.error(f"❌ DeepSeek 返回非 JSON。\\n```\\n{err_text}\\n```")
+        return {"matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
+                "summary": "比对失败：API 返回格式异常", "_error": f"JSON parse error"}
     except Exception as e:
         st.error(f"❌ DeepSeek API 调用失败: {e}")
-        return {
-            "matches": [],
-            "mismatches": [],
-            "only_in_standard": [],
-            "only_in_review": [],
-            "summary": f"比对失败: {str(e)}",
-            "_error": str(e),
-        }
+        return {"matches": [], "mismatches": [], "only_in_standard": [], "only_in_review": [],
+                "summary": f"比对失败: {str(e)}", "_error": str(e)}
+
+
+def check_internal_consistency(text: str, api_key: str, model: str) -> dict:
+    """
+    检查单文件内部数据一致性（所有字段，不受基准比对范围限制）。
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
+    prompt = f"""你是清关文件审核员。请检查以下文件**内部数据是否自洽**。
+
+检查要点：
+1. 同一信息在多处出现时是否一致（如金额大写和小写、同一公司名称前后写法）
+2. 数量×单价是否约等于总价（如有）
+3. 毛重应 ≥ 净重（如有）
+4. 日期逻辑是否合理（发票日期 ≤ 装箱日期 ≤ 提单日期）
+5. 收发货人、合同号、发票号、提单号在文件各处是否统一
+6. 其他任何明显的数据矛盾
+
+【文件文本（前6000字符）】
+{text[:6000]}
+
+只输出 JSON：
+
+{{
+  "consistent": true,
+  "issues": [{{"field": "字段", "location": "位置描述", "detail": "不一致说明", "severity": "high|medium|low"}}],
+  "summary": "内部一致性结论（30字内）"
+}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "你是清关审核专家，只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1, max_tokens=4096,
+            response_format={"type": "json_object"} if model == "deepseek-chat" else None,
+        )
+        result_text = response.choices[0].message.content.strip()
+        json_match = re.search(r"\{[\s\S]*\}", result_text)
+        if json_match:
+            result_text = json_match.group(0)
+        return json.loads(result_text)
+    except Exception as e:
+        return {"consistent": True, "issues": [], "summary": f"一致性检查异常: {str(e)}", "_error": str(e)}
 
 
 # ── Excel 导出 ───────────────────────────────────────────
@@ -653,8 +674,8 @@ if start_btn:
                 })
                 continue
 
-            # Step 4: DeepSeek 比对
-            st.write(f"  🤖 正在 AI 比对: **{review_file.name}**...")
+            # Step 4: 基准比对（核心字段）
+            st.write(f"  🤖 基准比对: **{review_file.name}**...")
             result = compare_with_deepseek(
                 standard_text=std_text,
                 review_text=rev_text,
@@ -663,6 +684,12 @@ if start_btn:
                 api_key=api_key,
                 model=model,
             )
+
+            # Step 5: 单文件内部一致性检查
+            st.write(f"  🔍 内部一致性检查: **{review_file.name}**...")
+            internal = check_internal_consistency(rev_text, api_key, model)
+            result["internal_consistency"] = internal
+
             result["file_name"] = review_file.name
             result["extract_method"] = rev_method
             result["extract_chars"] = len(rev_text)
@@ -785,6 +812,27 @@ if "results_cache" in st.session_state:
                     cols[1].markdown("**仅在复核文件中：**")
                     for item in only_rev:
                         cols[1].markdown(f"- {item}")
+
+            # ── 内部一致性检查 ──
+            internal = result.get("internal_consistency", {})
+            if internal:
+                issues = internal.get("issues", [])
+                st.markdown(f"#### 🔍 文件内部一致性")
+                if issues:
+                    st.markdown(f'<div class="info-item">⚠️ 发现 {len(issues)} 处数据矛盾</div>', unsafe_allow_html=True)
+                    for iss in issues:
+                        sev = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(iss.get("severity", ""), "⚪")
+                        st.markdown(
+                            f'<div class="mismatch-item">{sev} <b>{iss.get("field", "")}</b> '
+                            f'[{iss.get("severity", "unknown").upper()}]<br>'
+                            f'{iss.get("detail", "")}<br>'
+                            f'<small>位置：{iss.get("location", "")}</small></div>',
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.success(f"✅ {internal.get('summary', '文件内部数据自洽，未发现矛盾。')}")
+                if internal.get("_error"):
+                    st.caption(f"⚠️ {internal['_error']}")
 
             st.caption(
                 f"提取方式：{result.get('extract_method', 'N/A')} | "
