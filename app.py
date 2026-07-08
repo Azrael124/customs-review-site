@@ -39,13 +39,19 @@ with st.sidebar:
     st.divider()
     st.subheader("⚙️ API 配置")
 
-    # DeepSeek API Key
+    # DeepSeek API Key — 优先从 Streamlit Secrets 读取
+    default_key = ""
+    try:
+        default_key = st.secrets["DEEPSEEK_API_KEY"]
+    except Exception:
+        default_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
     api_key = st.text_input(
         "DeepSeek API Key",
         type="password",
-        value=os.environ.get("DEEPSEEK_API_KEY", ""),
-        help="从 platform.deepseek.com 获取 API Key。也可通过 Streamlit Secrets 设置环境变量 DEEPSEEK_API_KEY。",
-        placeholder="sk-..."
+        value=default_key,
+        help="从 platform.deepseek.com 获取。Streamlit Cloud 部署时已配置 Secrets 则自动填入。",
+        placeholder="sk-...",
     )
 
     # 模型选择
@@ -532,6 +538,18 @@ with btn_col1:
 
 with btn_col2:
     clear_btn = st.button("🗑️ 清除结果", use_container_width=True)
+
+with btn_col3:
+    # 缺失提示
+    missing = []
+    if not api_key:
+        missing.append("⚙️ 请在左侧侧边栏填写 DeepSeek API Key")
+    if not standard_file:
+        missing.append("📄 请上传标准文件（PDF）")
+    if not review_files:
+        missing.append("📑 请上传待复核文件")
+    if missing:
+        st.warning(" · ".join(missing))
 
 if clear_btn:
     for key in ["results_cache", "last_standard_name", "last_standard_hash"]:
