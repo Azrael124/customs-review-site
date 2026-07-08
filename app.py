@@ -343,26 +343,34 @@ def compare_with_deepseek(
             result_text = json_match.group(0)
 
         result = json.loads(result_text)
+
+        # 诊断：如果 matches 和 mismatches 都为空，记录原始响应
+        if not result.get("matches") and not result.get("mismatches"):
+            result["_warning"] = "AI 未识别到可比对的数据项。请检查文件是否为文本型 PDF（非扫描件），且内容包含清关字段。"
+            result["_raw_text_sample"] = standard_text[:500] + "\n...\n" + review_text[:500]
+
         return result
 
     except json.JSONDecodeError:
-        st.error("DeepSeek 返回内容无法解析为 JSON，请重试。")
-        st.code(result_text[:500] if "result_text" in dir() else "无返回内容")
+        err_text = result_text[:800] if "result_text" in dir() else "无返回内容"
+        st.error(f"❌ DeepSeek 返回了非 JSON 内容，无法解析。\n\n原始响应（前800字符）：\n```\n{err_text}\n```")
         return {
             "matches": [],
             "mismatches": [],
             "only_in_standard": [],
             "only_in_review": [],
             "summary": "比对失败：API 返回格式异常",
+            "_error": f"JSON parse error. Raw: {err_text[:200]}",
         }
     except Exception as e:
-        st.error(f"DeepSeek API 调用失败: {e}")
+        st.error(f"❌ DeepSeek API 调用失败: {e}")
         return {
             "matches": [],
             "mismatches": [],
             "only_in_standard": [],
             "only_in_review": [],
             "summary": f"比对失败: {str(e)}",
+            "_error": str(e),
         }
 
 
@@ -641,6 +649,13 @@ if "results_cache" in st.session_state:
     )
     metric_cols[4].metric("基准文件", standard_name[:15] + "..." if len(standard_name) > 15 else standard_name)
 
+    # 空结果诊断
+    if total_items == 0:
+        st.warning("⚠️ 未产生任何比对结果。可能原因：\n\n"
+                   "1. 上传的是**扫描件 PDF**（图片型），pdfplumber 提取不到文字 → 请确保文件为**文本型 PDF**\n"
+                   "2. 文件内容不含清关字段（纯图片、手写等）\n"
+                   "3. DeepSeek API 返回了空结果 → 检查 API Key 配额和网络")
+
     st.divider()
 
     # 逐份展示结果
@@ -649,6 +664,19 @@ if "results_cache" in st.session_state:
         matches = result.get("matches", [])
         mismatches = result.get("mismatches", [])
         summary = result.get("summary", "")
+
+        # 诊断信息
+        if result.get("_warning"):
+            with st.expander(f"⚠️ {file_name} — 未识别到可比对数据"):
+                st.warning(result["_warning"])
+                if result.get("_raw_text_sample"):
+                    st.caption("提取到的文本样本（前500字符）：")
+                    st.code(result["_raw_text_sample"][:1000], language=None)
+                st.caption(f"提取方式：{result.get('extract_method', 'N/A')} | "
+                          f"字符数：{result.get('extract_chars', 0):,} | "
+                          f"识别字段数：{result.get('detected_fields', 0)}")
+        if result.get("_error"):
+            st.error(f"❌ {file_name} — API 错误: {result['_error']}")
 
         with st.expander(
             f"{'✅' if len(mismatches) == 0 else '❌'} {file_name} — 一致 {len(matches)} / 不一致 {len(mismatches)}",
